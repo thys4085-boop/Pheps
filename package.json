@@ -1,0 +1,12 @@
+{
+  "name": "mahlangu-pheps-auto-repairs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mahlangu Pheps Auto Repairs & Diagnostics - mobile mechanic website with a secure serverless AI Mechanic Assistant proxy.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}
