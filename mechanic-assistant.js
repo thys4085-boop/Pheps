@@ -1,36 +1,21 @@
-// api/mechanic-assistant.js
+// netlify/functions/mechanic-assistant.js
 //
-// Vercel Serverless Function — secure backend proxy for the AI Mechanic Assistant.
+// Netlify Functions version of the same secure AI Mechanic Assistant proxy
+// used in /api/mechanic-assistant.js. Use THIS file instead if you're hosting
+// on Netlify rather than Vercel — the logic is identical, only the handler
+// signature differs (Netlify uses `event`/`context` instead of `req`/`res`).
 //
-// WHY THIS FILE EXISTS
+// DEPLOYMENT (Netlify)
 // ---------------------
-// The old version of this site called the Anthropic API directly from the
-// browser. That means an API key would have had to live in client-side
-// JavaScript, where ANYONE can read it (View Source, browser DevTools, or
-// just watching the Network tab). Once someone has that key, they can run up
-// unlimited usage on the business's Anthropic account. This file fixes that:
+// 1. Keep this file at netlify/functions/mechanic-assistant.js in your repo.
+// 2. In the Netlify dashboard: Site settings -> Environment variables ->
+//    add ANTHROPIC_API_KEY with your real key.
+// 3. Update the frontend fetch URL in the HTML from "/api/mechanic-assistant"
+//    to "/.netlify/functions/mechanic-assistant".
+// 4. Deploy (Netlify auto-detects functions in the netlify/functions folder,
+//    or configure the functions directory in netlify.toml).
 //
-//   Browser  --POST-->  /api/mechanic-assistant  --(server-to-server)-->  Anthropic API
-//
-// The real ANTHROPIC_API_KEY only ever lives on the server (as an environment
-// variable), never in HTML/JS shipped to the browser. The browser only ever
-// talks to this same-origin endpoint.
-//
-// DEPLOYMENT (Vercel — recommended, has a generous free tier)
-// -------------------------------------------------------------
-// 1. Put this whole project (the HTML file, /images, /api) in a folder and
-//    push it to a GitHub repo, or install the Vercel CLI (`npm i -g vercel`).
-// 2. Import the repo at vercel.com (New Project) or run `vercel` from the
-//    project folder. Vercel auto-detects the /api folder as serverless
-//    functions — no extra config needed for this file to work.
-// 3. In the Vercel dashboard: Project Settings -> Environment Variables ->
-//    add ANTHROPIC_API_KEY with your real key (get one at console.anthropic.com).
-// 4. Redeploy. Your assistant now works at https://your-site.vercel.app and
-//    the key is never exposed to visitors.
-//
-// (If you're not using Vercel, see /netlify/functions/mechanic-assistant.js
-// for the Netlify Functions equivalent, and README-deployment.md for
-// Cloudflare Pages Functions notes.)
+// If you deployed via Vercel instead, ignore this file — use /api/mechanic-assistant.js.
 
 const SYSTEM_PROMPT =
   "You are the AI Mechanic Assistant for Mahlangu Pheps Auto Repairs & Diagnostics, a mobile mechanic in South Africa. " +
@@ -41,19 +26,12 @@ const SYSTEM_PROMPT =
   "Keep every reply under 80 words. Never claim certainty - you're narrowing possibilities, not diagnosing. " +
   "Stay strictly on car problems, repairs, and this business; politely decline anything unrelated.";
 
-// Cheaper/faster model, well suited to short triage-style replies. Swap to
-// "claude-sonnet-5" for smarter (but pricier) answers if you want more depth.
 const MODEL = "claude-haiku-4-5-20251001";
 const MAX_TOKENS = 300;
-const MAX_HISTORY_MESSAGES = 12; // caps conversation length sent per request
-const MAX_MESSAGE_LENGTH = 800; // caps characters per message
+const MAX_HISTORY_MESSAGES = 12;
+const MAX_MESSAGE_LENGTH = 800;
 
-// ---- Very small in-memory rate limiter (best-effort only) ----
-// Serverless functions can run as multiple, short-lived instances, so this
-// resets often and isn't a substitute for real rate limiting. It's here to
-// blunt obvious abuse (e.g. a script hammering the endpoint) at zero cost.
-// For real protection at scale, use Vercel's built-in Firewall/Rate Limiting
-// or a shared store like Upstash Redis - see README-deployment.md.
+// Best-effort in-memory rate limiter — see note in api/mechanic-assistant.js
 const requestLog = new Map();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = 12;
@@ -68,43 +46,44 @@ function isRateLimited(key) {
   return timestamps.length > RATE_LIMIT_MAX;
 }
 
-module.exports = async (req, res) => {
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
-    return res.status(405).json({ error: "Method not allowed" });
+exports.handler = async (event) => {
+  if (event.httpMethod !== "POST") {
+    return { statusCode: 405, headers: { Allow: "POST" }, body: JSON.stringify({ error: "Method not allowed" }) };
   }
 
   const ip =
-    (req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
-    req.socket?.remoteAddress ||
+    event.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+    event.headers["client-ip"] ||
     "unknown";
 
   if (isRateLimited(ip)) {
-    return res.status(429).json({
-      error:
-        "Too many requests. Please try again shortly, or WhatsApp us directly on 081 307 1205.",
-    });
+    return {
+      statusCode: 429,
+      body: JSON.stringify({
+        error: "Too many requests. Please try again shortly, or WhatsApp us directly on 081 307 1205.",
+      }),
+    };
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error("ANTHROPIC_API_KEY is not set in environment variables");
-    return res.status(500).json({
-      error: "Assistant is not configured yet. Please WhatsApp us directly on 081 307 1205.",
-    });
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: "Assistant is not configured yet. Please WhatsApp us directly on 081 307 1205.",
+      }),
+    };
   }
 
   let body;
   try {
-    body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    body = JSON.parse(event.body || "{}");
   } catch {
-    return res.status(400).json({ error: "Invalid request body" });
+    return { statusCode: 400, body: JSON.stringify({ error: "Invalid request body" }) };
   }
 
   const incoming = Array.isArray(body?.messages) ? body.messages : [];
-
-  // Only ever forward role: user/assistant string content. The system prompt
-  // above is fixed server-side and can never be replaced by the client.
   const messages = incoming
     .filter(
       (m) =>
@@ -117,7 +96,7 @@ module.exports = async (req, res) => {
     .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_MESSAGE_LENGTH) }));
 
   if (messages.length === 0 || messages[messages.length - 1].role !== "user") {
-    return res.status(400).json({ error: "No user message provided" });
+    return { statusCode: 400, body: JSON.stringify({ error: "No user message provided" }) };
   }
 
   try {
@@ -139,10 +118,12 @@ module.exports = async (req, res) => {
     if (!anthropicRes.ok) {
       const errText = await anthropicRes.text();
       console.error("Anthropic API error:", anthropicRes.status, errText);
-      return res.status(502).json({
-        error:
-          "The assistant is temporarily unavailable. Please WhatsApp us directly on 081 307 1205.",
-      });
+      return {
+        statusCode: 502,
+        body: JSON.stringify({
+          error: "The assistant is temporarily unavailable. Please WhatsApp us directly on 081 307 1205.",
+        }),
+      };
     }
 
     const data = await anthropicRes.json();
@@ -152,13 +133,19 @@ module.exports = async (req, res) => {
       .join("\n")
       .trim();
 
-    return res.status(200).json({
-      reply: reply || "Sorry, I couldn't process that — please WhatsApp us on 081 307 1205.",
-    });
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        reply: reply || "Sorry, I couldn't process that — please WhatsApp us on 081 307 1205.",
+      }),
+    };
   } catch (err) {
     console.error("Mechanic assistant proxy error:", err);
-    return res.status(500).json({
-      error: "Something went wrong. Please WhatsApp us directly on 081 307 1205.",
-    });
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: "Something went wrong. Please WhatsApp us directly on 081 307 1205.",
+      }),
+    };
   }
 };
